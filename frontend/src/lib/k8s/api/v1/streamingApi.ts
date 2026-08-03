@@ -176,7 +176,7 @@ export function streamResultsForCluster(
 
       const watchUrl =
         url +
-        asQuery({ ...queryParams, ...{ watch: '1', resourceVersion: metadata.resourceVersion } });
+        asQuery({ ...queryParams, ...{ watch: '1', resourceVersion: metadata?.resourceVersion } });
       socket = stream(watchUrl, update, { isJson: true, cluster: clusterName });
     } catch (err) {
       console.error('Error in api request', { err, url });
