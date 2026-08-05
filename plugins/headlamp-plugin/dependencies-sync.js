@@ -75,6 +75,7 @@ const dependenciesToNotCopy = [
   '@tanstack/react-query-devtools',
   'remark-gfm',
   '@typescript/native-preview',
+  '@emotion/jest',
 ];
 
 // Dependencies that can have different versions
