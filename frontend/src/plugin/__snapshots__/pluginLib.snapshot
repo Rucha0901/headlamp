@@ -643,6 +643,7 @@
   "registerProjectDetailsTab": [Function],
   "registerProjectHeaderAction": [Function],
   "registerProjectOverviewSection": [Function],
+  "registerResourceRelationProvider": [Function],
   "registerResourceTableColumnsProcessor": [Function],
   "registerRoute": [Function],
   "registerRouteFilter": [Function],
@@ -676,5 +677,6 @@
     "storeStatelessClusterKubeconfig": [Function],
     "toStatelessConfigState": [Function],
   },
+  "useLayoutBreakpoints": [Function],
   "useTranslation": [Function],
 }
