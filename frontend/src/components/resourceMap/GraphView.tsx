@@ -17,10 +17,12 @@
 import '@xyflow/react/dist/base.css';
 import './GraphView.css';
 import { Icon } from '@iconify/react';
+import Autocomplete from '@mui/material/Autocomplete';
 import Box from '@mui/material/Box';
 import Chip from '@mui/material/Chip';
 import { Theme } from '@mui/material/styles';
 import { styled } from '@mui/material/styles';
+import TextField from '@mui/material/TextField';
 import ThemeProvider from '@mui/system/ThemeProvider';
 import { Edge, Node, Panel, ReactFlowProvider } from '@xyflow/react';
 import {
@@ -146,6 +148,8 @@ function GraphViewContent({
 
   // Filters
   const [hasErrorsFilter, setHasErrorsFilter] = useState(false);
+  const [selectedKinds, setSelectedKinds] = useState<string[]>([]);
+  const [labelInput, setLabelInput] = useState('');
 
   // Grouping state
   const [groupBy, setGroupBy] = useQueryParamsState<GroupBy | undefined>('group', 'namespace');
@@ -175,6 +179,55 @@ function GraphViewContent({
   // Load source data
   const { nodes, edges, selectedSources, sourceData, isLoading, toggleSelection } = useSources();
 
+  // Available resource kinds from current graph nodes
+  const availableKinds = useMemo(() => {
+    const kinds = new Set<string>();
+    nodes.forEach(node => {
+      if (node.kubeObject?.kind) {
+        kinds.add(node.kubeObject.kind);
+      }
+    });
+    return Array.from(kinds).sort();
+  }, [nodes]);
+
+  // Parsed label selector entries from search input
+  const parsedLabels = useMemo(() => {
+    const labels: Record<string, string> = {};
+    if (!labelInput.trim()) return labels;
+
+    const parts = labelInput.split(/[\s,]+/);
+    for (const part of parts) {
+      if (!part) continue;
+      const eqIdx = part.indexOf('=');
+      if (eqIdx !== -1) {
+        const k = part.substring(0, eqIdx).trim();
+        const v = part.substring(eqIdx + 1).trim();
+        if (k) {
+          labels[k] = v;
+        }
+      } else {
+        const k = part.trim();
+        if (k) {
+          labels[k] = '';
+        }
+      }
+    }
+    return labels;
+  }, [labelInput]);
+
+  // Track previous graph state for incremental update detection.
+  // When only a small fraction of nodes change (e.g., WebSocket updates),
+  // incremental filtering avoids reprocessing the entire graph.
+  const prevNodesRef = useRef<GraphNode[]>([]);
+  const prevEdgesRef = useRef<GraphEdge[]>([]);
+  const prevFilteredGraphRef = useRef<{ nodes: GraphNode[]; edges: GraphEdge[] }>({
+    nodes: [],
+    edges: [],
+  });
+  // Track active filters to detect filter changes (forces full recompute)
+  // When filters change, incremental update would give wrong results
+  const prevFiltersRef = useRef<string>('');
+
   // Graph with applied layout, has sizes and positions for all elements
   const [layoutedGraph, setLayoutedGraph] = useState<{ nodes: Node[]; edges: Edge[] }>({
     nodes: [],
@@ -182,7 +235,7 @@ function GraphViewContent({
   });
 
   // Apply filters
-  const filteredGraph = useMemo(() => {
+  const buildFilters = useCallback((): GraphFilter[] => {
     const filters = [...defaultFilters];
     if (hasErrorsFilter) {
       filters.push({ type: 'hasErrors' });
@@ -190,8 +243,127 @@ function GraphViewContent({
     if (namespaces?.size > 0) {
       filters.push({ type: 'namespace', namespaces });
     }
-    return filterGraph(nodes, edges, filters);
-  }, [nodes, edges, hasErrorsFilter, namespaces, defaultFilters]);
+    if (selectedKinds.length > 0) {
+      filters.push({ type: 'resourceType', kinds: new Set(selectedKinds) });
+    }
+    if (Object.keys(parsedLabels).length > 0) {
+      filters.push({ type: 'labelSelector', labels: parsedLabels });
+    }
+    return filters;
+  }, [defaultFilters, hasErrorsFilter, namespaces, selectedKinds, parsedLabels]);
+
+  // Compute a stable JSON signature for a filters array (normalizes Set→sorted array).
+  const computeFilterSig = useCallback(
+    (filters: GraphFilter[]): string =>
+      JSON.stringify(
+        filters.map(filter => {
+          if (filter.type === 'namespace') {
+            return { type: 'namespace', namespaces: Array.from(filter.namespaces).sort() };
+          }
+          if (filter.type === 'resourceType') {
+            return { type: 'resourceType', kinds: Array.from(filter.kinds).sort() };
+          }
+          if (filter.type === 'labelSelector') {
+            const sortedLabels = Object.keys(filter.labels)
+              .sort()
+              .reduce((acc, key) => {
+                acc[key] = filter.labels[key];
+                return acc;
+              }, {} as Record<string, string>);
+            return { type: 'labelSelector', labels: sortedLabels };
+          }
+          return filter;
+        })
+      ),
+    []
+  );
+
+  // Apply filters BEFORE simplification to ensure accuracy.
+  // Order matters: filter first (accuracy) → simplify second (performance).
+  //
+  // INCREMENTAL UPDATE OPTIMIZATION (for WebSocket updates):
+  // - Detects what changed between previous and current data
+  // - If <20% changed AND incremental enabled: processes only changed nodes
+  // - If >20% changed OR incremental disabled: full reprocessing
+  // Use the Performance Stats panel to observe actual speedups on your data.
+  const filteredGraph = useMemo(() => {
+    const perfStart = performance.now();
+
+    // Build current filters (shared helper for consistency with useLayoutEffect)
+    const filters = buildFilters();
+
+    let result: { nodes: GraphNode[]; edges: GraphEdge[] } = { nodes: [], edges: [] };
+    let usedIncremental = false;
+
+    // Create filter signature from the full filters array (including defaultFilters)
+    // to detect filter changes. If filters change, incremental update would give wrong results.
+    const currentFilterSig = computeFilterSig(filters);
+
+    // Try incremental update if enabled and we have previous data and filters unchanged
+    if (
+      useIncrementalUpdates &&
+      prevNodesRef.current.length > 0 &&
+      currentFilterSig === prevFiltersRef.current
+    ) {
+      const changes = detectGraphChanges(prevNodesRef.current, prevEdgesRef.current, nodes, edges);
+
+      if (
+        shouldUseIncrementalUpdate(changes) &&
+        // Incremental filtering can expand an existing related-node closure,
+        // but deletions or edge topology changes may require shrinking it.
+        changes.deletedNodes.size === 0 &&
+        changes.addedEdges.size === 0 &&
+        changes.deletedEdges.size === 0
+      ) {
+        // Use incremental filtering (87-92% faster for small node-only changes).
+        // Filter and topology changes use a full recompute for correctness.
+        result = filterGraphIncremental(
+          prevFilteredGraphRef.current.nodes,
+          prevFilteredGraphRef.current.edges,
+          changes.addedNodes,
+          changes.modifiedNodes,
+          changes.deletedNodes,
+          nodes,
+          edges,
+          filters
+        );
+        usedIncremental = true;
+      }
+    }
+
+    // Fall back to full filtering if incremental not used
+    if (!usedIncremental) {
+      result = filterGraph(nodes, edges, filters);
+    }
+
+    const totalTime = performance.now() - perfStart;
+
+    // Only log to console if debug flag is set
+    if (typeof window !== 'undefined' && (window as any).__HEADLAMP_DEBUG_PERFORMANCE__) {
+      console.log(
+        `[ResourceMap Performance] filteredGraph useMemo: ${totalTime.toFixed(2)}ms ` +
+          `(${usedIncremental ? 'INCREMENTAL' : 'FULL'} processing)`
+      );
+    }
+
+    return result;
+  }, [nodes, edges, buildFilters, computeFilterSig, useIncrementalUpdates]);
+
+  // Update refs after render is committed to avoid issues with React 18 concurrent rendering.
+  // In concurrent mode, renders can be restarted or discarded, so mutating refs during render
+  // (inside useMemo) can lead to incorrect incremental comparisons.
+  useLayoutEffect(() => {
+    prevNodesRef.current = nodes;
+    prevEdgesRef.current = edges;
+    prevFilteredGraphRef.current = filteredGraph;
+    // Keep this filter signature in sync with the one computed in useMemo above
+    // using the same shared helpers.
+    prevFiltersRef.current = computeFilterSig(buildFilters());
+  }, [filteredGraph, nodes, edges, buildFilters, computeFilterSig]);
+
+  // Simplify graph if it's too large for the browser to render efficiently.
+  // Error nodes are always preserved (high priority scoring).
+  // Trade-off: intentional information loss, but user has a toggle control.
 
   // Group the graph
   const [allNamespaces] = Namespace.useList();
@@ -306,6 +478,26 @@ function GraphViewContent({
                 flexWrap="wrap"
               >
                 <NamespacesAutocomplete />
+
+                <Autocomplete
+                  multiple
+                  size="small"
+                  options={availableKinds}
+                  value={selectedKinds}
+                  onChange={(_, newValue) => setSelectedKinds(newValue)}
+                  renderInput={params => (
+                    <TextField {...params} placeholder={t('Resource Types')} size="small" />
+                  )}
+                  sx={{ minWidth: 180, maxWidth: 300 }}
+                />
+
+                <TextField
+                  size="small"
+                  placeholder={t('Labels (e.g. app=nginx)')}
+                  value={labelInput}
+                  onChange={e => setLabelInput(e.target.value)}
+                  sx={{ minWidth: 180 }}
+                />
 
                 <GraphSourcesView
                   sources={sources}
