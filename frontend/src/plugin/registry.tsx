@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+import { type Breakpoints, useTheme } from '@mui/material/styles';
+import useMediaQuery from '@mui/material/useMediaQuery';
 import { has } from 'lodash';
 import React, { ReactNode } from 'react';
 import { AppLogoProps, AppLogoType } from '../components/App/AppLogo';
@@ -1242,6 +1244,127 @@ export function registerShortcut(config: PluginShortcutConfig) {
  */
 export function deregisterShortcut(id: string) {
   store.dispatch(deregisterShortcutAction(id));
+}
+
+export interface LayoutBreakpoints {
+  /** Theme breakpoint pixel values (xs, sm, md, lg, xl) */
+  values: Breakpoints['values'];
+  /** Whether screen size is extra small (< sm) */
+  isXs: boolean;
+  /** Whether screen size is small (>= sm and < md) */
+  isSm: boolean;
+  /** Whether screen size is medium (>= md and < lg) */
+  isMd: boolean;
+  /** Whether screen size is large (>= lg and < xl) */
+  isLg: boolean;
+  /** Whether screen size is extra large (>= xl) */
+  isXl: boolean;
+  /** Convenience boolean indicating mobile view (< sm) */
+  isMobile: boolean;
+  /** Convenience boolean indicating tablet view (>= sm and < md) */
+  isTablet: boolean;
+}
+
+/**
+ * Utility hook that exposes the unified layout breakpoints system to custom plugins.
+ */
+export function useLayoutBreakpoints(): LayoutBreakpoints {
+  const theme = useTheme();
+  const isXs = useMediaQuery(theme.breakpoints.only('xs'));
+  const isSm = useMediaQuery(theme.breakpoints.only('sm'));
+  const isMd = useMediaQuery(theme.breakpoints.only('md'));
+  const isLg = useMediaQuery(theme.breakpoints.only('lg'));
+  const isXl = useMediaQuery(theme.breakpoints.up('xl'));
+  const isMobile = useMediaQuery(theme.breakpoints.down('sm'));
+  const isTablet = useMediaQuery(theme.breakpoints.between('sm', 'md'));
+
+  return {
+    values: theme.breakpoints.values,
+    isXs,
+    isSm,
+    isMd,
+    isLg,
+    isXl,
+    isMobile,
+    isTablet,
+  };
+}
+
+/**
+ * Registers a custom resource relation definition (a Relation object) for the Resource Map.
+ *
+ * @param relation - The Relation definition object to add.
+ *                   Note: relation.id must be globally unique (across core, CRD, and plugin relations)
+ *                   to prevent silent edge loss and collision-based deduplication issues.
+ *                   It is highly recommended to namespace the ID with the plugin name
+ *                   (e.g., `'my-plugin.deployment-secret'`).
+ *
+ * @example
+ * ```tsx
+ * registerResourceRelationProvider({
+ *   id: 'my-plugin.deployment-secret',
+ *   fromSource: 'apps/Deployment',
+ *   toSource: 'Secret',
+ *   label: 'Uses Secret',
+ *   predicate: (from, to) => ...
+ * });
+ * ```
+ */
+
+export function registerResourceRelationProvider(relation: Relation) {
+  if (
+    !relation ||
+    typeof relation.id !== 'string' ||
+    relation.id.length === 0 ||
+    typeof relation.fromSource !== 'string' ||
+    relation.fromSource.length === 0 ||
+    typeof relation.predicate !== 'function'
+  ) {
+    console.warn(
+      `Invalid relation registration: relation must have a non-empty "id" string, a non-empty "fromSource" string, and a "predicate" function.`
+    );
+    return;
+  }
+
+  if (
+    relation.toSource !== undefined &&
+    (typeof relation.toSource !== 'string' || relation.toSource.length === 0)
+  ) {
+    console.warn(
+      `Invalid relation registration: if "toSource" is provided, it must be a non-empty string.`
+    );
+    return;
+  }
+
+  if (
+    relation.label !== undefined &&
+    (typeof relation.label !== 'string' || relation.label.length === 0)
+  ) {
+    console.warn(
+      `Invalid relation registration: if "label" is provided, it must be a non-empty string.`
+    );
+    return;
+  }
+
+  const isBuiltIn =
+    BUILT_IN_RELATION_IDS.includes(relation.id) ||
+    relation.id.startsWith('owner-') ||
+    relation.id.startsWith('owner-reversed-');
+
+  if (isBuiltIn) {
+    console.warn(
+      `Relation with id "${relation.id}" collides with a built-in relation ID. Skipping.`
+    );
+    return;
+  }
+
+  const relations = store.getState().graphView.relations;
+  const exists = relations.some(r => r.id === relation.id);
+  if (exists) {
+    console.warn(`Relation with id "${relation.id}" already exists. Skipping.`);
+    return;
+  }
+  store.dispatch(graphViewSlice.actions.addRelation(relation));
 }
 
 export {
