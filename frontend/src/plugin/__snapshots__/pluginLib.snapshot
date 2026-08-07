@@ -691,6 +691,7 @@
   },
   "clusterAction": [Function],
   "default": [Function],
+  "deregisterShortcut": [Function],
   "getHeadlampAPIHeaders": [Function],
   "registerAddClusterProvider": [Function],
   "registerAppBarAction": [Function],
@@ -723,6 +724,7 @@
   "registerRoute": [Function],
   "registerRouteFilter": [Function],
   "registerSetTokenFunction": [Function],
+  "registerShortcut": [Function],
   "registerSidebarEntry": [Function],
   "registerSidebarEntryFilter": [Function],
   "registerUIPanel": [Function],
@@ -751,5 +753,6 @@
     "storeStatelessClusterKubeconfig": [Function],
     "toStatelessConfigState": [Function],
   },
+  "useLayoutBreakpoints": [Function],
   "useTranslation": [Function],
 }
